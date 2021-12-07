@@ -15,6 +15,7 @@ val group = "org.eclipse.dataspaceconnector"
 dependencies {
     // dependencies from this project
     implementation(project(":extensions:public-rest-api"))
+    implementation(project(":extensions:edc-demo-api"))
     implementation(project(":extensions:dataseeding:catalog"))
     implementation(project(":extensions:dataseeding:hub"))
     implementation(project(":extensions:transfer-azure-s3"))
