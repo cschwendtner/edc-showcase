@@ -1,36 +1,40 @@
 package org.eclipse.dataspaceconnector.demo.edc_demo.api;
 
-import jakarta.ws.rs.Consumes;
-import jakarta.ws.rs.DELETE;
-import jakarta.ws.rs.GET;
-import jakarta.ws.rs.POST;
-import jakarta.ws.rs.Path;
-import jakarta.ws.rs.PathParam;
-import jakarta.ws.rs.Produces;
-import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.eclipse.dataspaceconnector.catalog.spi.QueryEngine;
 import org.eclipse.dataspaceconnector.catalog.spi.QueryResponse;
 import org.eclipse.dataspaceconnector.catalog.spi.model.FederatedCatalogCacheQuery;
 import org.eclipse.dataspaceconnector.common.collection.CollectionUtil;
+import org.eclipse.dataspaceconnector.dataloading.AssetEntry;
+import org.eclipse.dataspaceconnector.dataloading.DataLoader;
+import org.eclipse.dataspaceconnector.dataloading.DataSink;
+import org.eclipse.dataspaceconnector.demo.edc_demo.api.dtos.TransferProcessCreationDto;
+import org.eclipse.dataspaceconnector.demo.edc_demo.api.dtos.StorageTypeDto;
+import org.eclipse.dataspaceconnector.demo.edc_demo.api.dtos.TransferProcessDto;
+import org.eclipse.dataspaceconnector.policy.model.*;
+import org.eclipse.dataspaceconnector.schema.azure.AzureBlobStoreSchema;
+import org.eclipse.dataspaceconnector.spi.contract.offer.store.ContractDefinitionStore;
 import org.eclipse.dataspaceconnector.spi.message.RemoteMessageDispatcherRegistry;
 import org.eclipse.dataspaceconnector.spi.monitor.Monitor;
+import org.eclipse.dataspaceconnector.spi.policy.PolicyRegistry;
 import org.eclipse.dataspaceconnector.spi.transfer.TransferProcessManager;
 import org.eclipse.dataspaceconnector.spi.transfer.response.ResponseStatus;
 import org.eclipse.dataspaceconnector.spi.transfer.store.TransferProcessStore;
-import org.eclipse.dataspaceconnector.spi.types.domain.metadata.QueryRequest;
+import org.eclipse.dataspaceconnector.spi.types.domain.contract.offer.ContractDefinition;
+import org.eclipse.dataspaceconnector.spi.types.domain.transfer.DataAddress;
 import org.eclipse.dataspaceconnector.spi.types.domain.transfer.DataRequest;
+import org.eclipse.dataspaceconnector.spi.types.domain.transfer.TransferProcess;
 import org.eclipse.dataspaceconnector.spi.types.domain.transfer.TransferProcessStates;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutionException;
+import java.sql.Timestamp;
+import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
-import static org.eclipse.dataspaceconnector.common.types.Cast.cast;
+import static org.eclipse.dataspaceconnector.policy.model.Operator.IN;
 
 @Consumes({ MediaType.APPLICATION_JSON })
 @Produces({ MediaType.APPLICATION_JSON })
@@ -42,137 +46,219 @@ public class EdcDemoApiController {
     private final String connectorName;
     private final QueryEngine catalogQueryEngine;
     private final RemoteMessageDispatcherRegistry dispatcherRegistry;
+    private final ContractDefinitionStore contractDefinitionStore;
+    private final String connectorId;
+    private final DataSink<AssetEntry> assetSink;
 
+    private static List<StorageTypeDto> fakeStorageTypeDtos = Arrays.asList(
+        new StorageTypeDto("AzureStorage", "Azure Storage"),
+        new StorageTypeDto("AmazonS3", "AWS S3"));
 
-    public EdcDemoApiController(String connectorName, Monitor monitor, TransferProcessManager transferProcessManager, TransferProcessStore processStore, QueryEngine catalogQueryEngine, RemoteMessageDispatcherRegistry dispatcherRegistry) {
-        this.connectorName = connectorName;
+    public EdcDemoApiController(String connectorName, Monitor monitor, TransferProcessManager transferProcessManager, TransferProcessStore processStore, QueryEngine catalogQueryEngine, RemoteMessageDispatcherRegistry dispatcherRegistry, ContractDefinitionStore contractDefinitionStore, String connectorId, DataSink<AssetEntry> assetSink) {
+        this.connectorName = connectorName; // is connector id
         this.monitor = monitor;
         this.transferProcessManager = transferProcessManager;
         this.processStore = processStore;
         this.catalogQueryEngine = catalogQueryEngine;
         this.dispatcherRegistry = dispatcherRegistry;
+        this.contractDefinitionStore = contractDefinitionStore;
+        this.connectorId = connectorId;
+        this.assetSink = assetSink;
     }
 
     @GET
     @Path("health")
-    public Response health() {
-        monitor.info("/health");
-        HashMap<String, String> m = formatAsJson("up and running");
-        return Response.ok(m).build();
-    }
-
-
-    @Deprecated
-    @GET
-    @Path("catalog")
-    public Response getCatalog(@QueryParam("connectorAddress") String connectorAddress) throws ExecutionException, InterruptedException {
-        monitor.info("catalog requested");
-        var query = QueryRequest.Builder.newInstance()
-                .connectorAddress(connectorAddress)
-                .connectorId(connectorName)
-                .queryLanguage("dataspaceconnector")
-                .query("select *")
-                .protocol("ids-rest").build();
-
-        CompletableFuture<List<String>> future = cast(dispatcherRegistry.send(List.class, query, () -> null));
-
-        return Response.ok(future.get()).build();
+    public Response getHealth() {
+        monitor.info("GET /edc-demo/health - getHealth()");
+        var result = Collections.singletonMap("status", "up and running");
+        return Response.ok(result).build();
     }
 
     @GET
-    @Path("catalog/cached")
-    public Response getCatalogCached() {
-        FederatedCatalogCacheQuery query = FederatedCatalogCacheQuery.Builder.newInstance()
+    @Path("assets")
+    public Response getAssets() {
+        monitor.info("GET /edc-demo/assets - getAssets()");
+
+        FederatedCatalogCacheQuery query = FederatedCatalogCacheQuery
+                .Builder
+                .newInstance()
                 .build();
 
         var queryResponse = catalogQueryEngine.getCatalog(query);
         if (queryResponse.getStatus() == QueryResponse.Status.NO_ADAPTER_FOUND) {
             return Response.status(Response.Status.NOT_IMPLEMENTED).build();
         }
+
         if (!queryResponse.getErrors().isEmpty()) {
             return Response.status(400, String.join(", ", queryResponse.getErrors())).build();
         }
 
-        return Response.ok(queryResponse.getAssets()).build();
+        var result = queryResponse.getAssets();
+
+        return Response.ok(result).build();
+    }
+
+    @GET
+    @Path("contract-definitions")
+    public Response getContractDefinitions() {
+        monitor.info("GET /edc-demo/contract-definitions - getContractDefinitions()");
+
+        var contractDefinitions = this.contractDefinitionStore.findAll();
+
+        return Response.ok().entity(contractDefinitions).build();
     }
 
     @POST
-    @Path("datarequest")
-    public Response initiateDataRequest(DataRequest request) {
-        if (request == null) {
-            return Response.status(400).entity("data request cannot be null").build();
-        }
-        request = request.copy(UUID.randomUUID().toString()); //assign random ID
-        monitor.info("Received new data request, ID = " + request.getId());
-        var response = transferProcessManager.initiateConsumerRequest(request);
-        monitor.info("Created new transfer process, ID = " + response.getId());
+    @Path("contract-definitions")
+    public Response createContractDefinition(ContractDefinition contractDefinition) {
+        monitor.info("POST /edc-demo/contract-definitions - createContractDefinition()");
 
-        ResponseStatus status = response.getStatus();
+        if (contractDefinition == null) {
+            return Response.status(Response.Status.BAD_REQUEST).entity("contract definition cannot be null").build();
+        }
+
+        this.contractDefinitionStore.save(contractDefinition);
+
+        return Response.ok().entity(contractDefinition).build();
+    }
+
+    @PUT
+    @Path("contract-definitions/{id}")
+    public Response updateContractDefinition(@PathParam("id") String id, ContractDefinition contractDefinition) {
+        monitor.info(String.format("PUT /edc-demo/contract-definitions/%s - updateContractDefinition()", id));
+
+        if (contractDefinition == null) {
+            return Response.status(Response.Status.BAD_REQUEST).entity("contract definition cannot be null").build();
+        }
+
+        this.contractDefinitionStore.update(contractDefinition);
+
+        return Response.ok().entity(contractDefinition).build();
+    }
+
+    @GET
+    @Path("policies")
+    public Response getPolicies() {
+        monitor.info("GET /policies - getPolicies()");
+
+        var policies = new HashMap<String, Policy>();
+
+        var contractDefinitions = this.contractDefinitionStore.findAll();
+
+        for (var cd : contractDefinitions) {
+            var accessPolicy = cd.getAccessPolicy();
+            policies.put(accessPolicy.getUid(), accessPolicy);
+
+            var contractPolicy = cd.getContractPolicy();
+            policies.put(contractPolicy.getUid(), contractPolicy);
+        }
+
+        return Response.ok().entity(policies.values()).build();
+    }
+
+    @GET
+    @Path("transfer-processes")
+    public Response getTransferProcesses() {
+        monitor.info("GET /edc-demo/transfer-processes - getTransferProcesses()");
+
+        var transferProcesses = new ArrayList<TransferProcess>();
+
+        Stream.of(TransferProcessStates.values()).forEach(state -> transferProcesses.addAll(processStore.nextForState(state.code(), 10)));
+
+        var transferProcessDtos = transferProcesses
+                .stream()
+                .map(this::mapToTransferProcessDto)
+                .sorted(Comparator.comparing(TransferProcessDto::getStateTimestamp).reversed())
+                .collect(Collectors.toList());
+
+        return Response.ok().entity(transferProcessDtos).build();
+    }
+
+    @GET
+    @Path("transfer-processes/{id}")
+    public Response getTransferProcessById(@PathParam("id") String id) {
+        monitor.info(String.format("GET /edc-demo/transfer-processes/%s - getTransferProcessById()", id));
+
+        var process = processStore.find(id);
+        if (process == null) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        return Response.ok(mapToTransferProcessDto(process)).build();
+    }
+
+    @POST
+    @Path("transfer-processes")
+    public Response createTransferProcess(TransferProcessCreationDto transferProcessCreation) {
+        monitor.info("POST /edc-demo/transfer-processes - createTransferProcess()");
+
+        if (transferProcessCreation == null) {
+            return Response.status(Response.Status.BAD_REQUEST).entity("data request cannot be null").build();
+        }
+
+        var destinationDataAddress = DataAddress.Builder.newInstance().type(transferProcessCreation.getDataDestinationType())
+                .property(AzureBlobStoreSchema.ACCOUNT_NAME, "edcshowcasegpstorage")
+                .property(AzureBlobStoreSchema.CONTAINER_NAME, "dst-container")
+                .property(AzureBlobStoreSchema.BLOB_NAME, UUID.randomUUID().toString())
+                .build();
+
+        var dataRequest = DataRequest.Builder.newInstance()
+                .id(UUID.randomUUID().toString())
+                .connectorId(this.connectorId)
+                .protocol("ids-rest")
+                .connectorAddress(transferProcessCreation.getConnectorAddress())
+                .assetId(transferProcessCreation.getAssetId())
+                .contractId(transferProcessCreation.getContractId())
+                .dataDestination(destinationDataAddress)
+                .managedResources(true)
+                .build();
+
+        var transferResponse = transferProcessManager.initiateConsumerRequest(dataRequest);
+
+        ResponseStatus status = transferResponse.getStatus();
         if (status == ResponseStatus.OK) {
-            return Response.ok(response).build();
+            var transferProcess = processStore.find(transferResponse.getId());
+            return Response.ok().entity(mapToTransferProcessDto(transferProcess)).build();
         } else {
-            return Response.status(Response.Status.BAD_REQUEST).entity(response.getStatus().name()).build();
+            return Response.status(Response.Status.BAD_REQUEST).entity(transferResponse.getStatus().name()).build();
         }
     }
 
     @GET
-    @Path("datarequest/{id}")
-    public Response getDatarequest(@PathParam("id") String requestId) {
-        monitor.info("getting status of data request " + requestId);
-
-        var process = processStore.find(requestId);
-        if (process == null) {
-            return Response.status(Response.Status.NOT_FOUND).build();
-        }
-        return Response.ok(process).build();
+    @Path("storage-types")
+    public Response getStorageTypes() {
+        monitor.info("GET /edc-demo/storage-types - getStorageTypes()");
+        return Response.ok().entity(fakeStorageTypeDtos).build();
     }
 
-    @DELETE
-    @Path("datarequest/{id}")
-    public Response deprovisionRequest(@PathParam("id") String requestId) {
+    @POST
+    @Path("asset-entries")
+    public Response createAssetEntry(AssetEntry assetEntry) {
+        monitor.info("POST /edc-demo/asset-entries - createAssetEntry()");
 
-        var process = processStore.find(requestId);
-        if (process == null) {
-            return Response.status(Response.Status.NOT_FOUND).build();
-        }
-        try {
-            if (CollectionUtil.isAnyOf(process.getState(),
-                    TransferProcessStates.DEPROVISIONED.code(),
-                    TransferProcessStates.DEPROVISIONING_REQ.code(),
-                    TransferProcessStates.DEPROVISIONING.code(),
-                    TransferProcessStates.ENDED.code()
-            )) {
-                monitor.info("Request already deprovisioning or deprovisioned.");
-            } else {
-                monitor.info("starting to deprovision data request " + requestId);
-                process.transitionCompleted();
-                process.transitionDeprovisionRequested();
-                processStore.update(process);
-            }
-            return Response.ok(formatAsJson(TransferProcessStates.from(process.getState()).toString())).build();
-        } catch (IllegalStateException ex) {
-            monitor.severe(ex.getMessage());
-            return Response.status(400).entity("The process must be in one of these states: " + String.join(", ", TransferProcessStates.IN_PROGRESS.name(), TransferProcessStates.REQUESTED_ACK.name(), TransferProcessStates.STREAMING.name())).build();
+        if (assetEntry == null) {
+            return Response.status(Response.Status.BAD_REQUEST).entity("assetEntry must not be null").build();
         }
 
+        DataLoader.Builder<AssetEntry> dataLoaderBuilder = DataLoader.Builder.newInstance();
+        var dataLoader = dataLoaderBuilder.sink(assetSink).build();
+
+        dataLoader.insert(assetEntry);
+
+        return Response.ok().entity(assetEntry).build();
     }
 
-    @GET
-    @Path("datarequest/{id}/state")
-    public Response getStatus(@PathParam("id") String requestId) {
-        monitor.info("getting status of data request " + requestId);
-
-        var process = processStore.find(requestId);
-        if (process == null) {
-            return Response.status(Response.Status.NOT_FOUND).build();
-        }
-        return Response.ok(formatAsJson(TransferProcessStates.from(process.getState()).toString())).build();
-    }
-
-    @NotNull
-    private HashMap<String, String> formatAsJson(String simpleValue) {
-        var m = new HashMap<String, String>();
-        m.put("response", simpleValue);
-        return m;
+    private TransferProcessDto mapToTransferProcessDto(TransferProcess transferProcess) {
+        return new TransferProcessDto(
+                transferProcess.getId(),
+                transferProcess.getType().toString(),
+                transferProcess.getState(),
+                new Timestamp(transferProcess.getStateTimestamp()),
+                transferProcess.getErrorDetail(),
+                transferProcess.getDataRequest().getConnectorAddress(),
+                transferProcess.getDataRequest().getProtocol(),
+                transferProcess.getDataRequest().getConnectorId(),
+                transferProcess.getDataRequest().getAssetId(),
+                transferProcess.getDataRequest().getContractId(),
+                transferProcess.getDataRequest().getDestinationType());
     }
 }

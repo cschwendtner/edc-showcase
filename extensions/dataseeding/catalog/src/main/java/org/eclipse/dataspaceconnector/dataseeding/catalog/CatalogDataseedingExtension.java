@@ -70,6 +70,7 @@ public class CatalogDataseedingExtension implements ServiceExtension {
 
     public void setupContractOffers() {
         Policy publicPolicy = Policy.Builder.newInstance()
+                .id("use-eu")
                 .permission(Permission.Builder.newInstance()
                         .target("1")
                         .action(Action.Builder.newInstance()
@@ -79,6 +80,7 @@ public class CatalogDataseedingExtension implements ServiceExtension {
                 .build();
 
         Policy publicPolicy2 = Policy.Builder.newInstance()
+                .id("use-us")
                 .permission(Permission.Builder.newInstance()
                         .target("2")
                         .action(Action.Builder.newInstance()
@@ -138,7 +140,7 @@ public class CatalogDataseedingExtension implements ServiceExtension {
     private void saveNodeEntries(ServiceExtensionContext context) {
         var nodeDirectory = context.getService(FederatedCacheNodeDirectory.class);
 
-        var nodes = readNodesFromJson("nodes.json");
+        var nodes = readNodesFromJson("nodes-local.json");
         nodes.forEach(nodeDirectory::insert);
     }
 
@@ -202,7 +204,7 @@ public class CatalogDataseedingExtension implements ServiceExtension {
                 .type("AzureStorage")
                 .property("account", "edcshowcasegpstorage")
                 .property("container", "src-container")
-                .property("blobname", "complex_schematic_drawing")
+                .property("blobname", "complex_schematic_drawing.jpg")
                 .build();
 
         var asset4 = Asset.Builder.newInstance()

@@ -55,6 +55,15 @@ class BlobStoreWriter implements DataWriter {
                     .buildClient();
 
             blobClient.upload(BinaryData.fromStream(data), true);
+
+            blobClient = new BlobClientBuilder()
+                    .endpoint(endpoint)
+                    .sasToken(sas)
+                    .containerName(container)
+                    .blobName(name + ".complete")
+                    .buildClient();
+
+            blobClient.upload(BinaryData.fromBytes(new byte[0]), true);
         }
     }
 }
